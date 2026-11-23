@@ -1,38 +1,82 @@
-import { exec } from 'child_process';
 import express from 'express';
 import cors from 'cors';
 import crypto from 'crypto';
 import jwt from 'jsonwebtoken';
-import path from 'path';
-import { fileURLToPath } from 'url';
-import { createServer as createViteServer } from 'vite';
-
-const __filename = fileURLToPath(import.meta.url);
-const __dirname = path.dirname(__filename);
 
 const JWT_SECRET = process.env.JWT_SECRET || 'findlt-super-secret-campus-jwt-key-2026';
 const PORT = process.env.PORT ? parseInt(process.env.PORT, 10) : 5000;
+
+const ADMIN_EMAIL = (process.env.ADMIN_EMAIL || 'admin@campus.edu').trim().toLowerCase();
+const ADMIN_ID = (process.env.ADMIN_ID || 'ADM-8801').trim();
+const ADMIN_PASSWORD = process.env.ADMIN_PASSWORD || 'Admin@123';
 
 // Helper: Secure password hashing
 function hashPassword(password: string): string {
   return crypto.createHash('sha256').update(password + 'findlt_salt_salt').digest('hex');
 }
 
+// Helper: Parse single file from multipart/form-data without external dependencies
+function parseMultipartFile(
+  req: express.Request
+): Promise<{ buffer: Buffer; filename: string; mimetype: string } | null> {
+  return new Promise((resolve, reject) => {
+    const contentType = req.headers['content-type'] || '';
+    const boundaryMatch = contentType.match(/boundary=(?:"([^"]+)"|([^;]+))/i);
+    if (!boundaryMatch) {
+      return resolve(null);
+    }
+    const boundary = '--' + (boundaryMatch[1] || boundaryMatch[2]);
+    const chunks: Buffer[] = [];
+
+    req.on('data', (chunk: Buffer) => chunks.push(chunk));
+    req.on('end', () => {
+      try {
+        const rawBuffer = Buffer.concat(chunks);
+        const rawString = rawBuffer.toString('latin1');
+        const parts = rawString.split(boundary);
+
+        for (const part of parts) {
+          if (part.includes('filename="')) {
+            const headerEndIdx = part.indexOf('\r\n\r\n');
+            if (headerEndIdx === -1) continue;
+
+            const headers = part.slice(0, headerEndIdx);
+            const filenameMatch = headers.match(/filename="([^"]+)"/i);
+            const contentTypeMatch = headers.match(/Content-Type:\s*([^\r\n]+)/i);
+
+            const filename = filenameMatch ? filenameMatch[1] : `upload_${Date.now()}.jpg`;
+            const mimetype = contentTypeMatch ? contentTypeMatch[1].trim() : 'image/jpeg';
+
+            const bodyStart = headerEndIdx + 4;
+            const bodyEnd = part.endsWith('\r\n') ? part.length - 2 : part.length;
+            const fileBuffer = Buffer.from(part.slice(bodyStart, bodyEnd), 'latin1');
+
+            return resolve({ buffer: fileBuffer, filename, mimetype });
+          }
+        }
+        resolve(null);
+      } catch (err) {
+        reject(err);
+      }
+    });
+    req.on('error', reject);
+  });
+}
+
 // In-Memory Database store with preloaded realistic campus data
-// When Supabase env credentials are provided, queries map directly to Supabase PostgreSQL
 let profiles: any[] = [
   {
     id: 'usr_admin_01',
     full_name: 'Dr. Arthur Pendelton',
-    campus_id: 'ADM-8801',
-    email: 'admin@campus.edu',
+    campus_id: ADMIN_ID,
+    email: ADMIN_EMAIL,
     phone: '+1 (555) 234-5678',
     department: 'Campus Safety & Administration',
     course: 'Security Operations',
     semester: 'Staff',
     role: 'admin',
     account_status: 'active',
-    password_hash: hashPassword('Admin@123'),
+    password_hash: hashPassword(ADMIN_PASSWORD),
     created_at: new Date(Date.now() - 30 * 86400000).toISOString()
   },
   {
@@ -102,7 +146,7 @@ let items: any[] = [
     item_type: 'found',
     brand: 'Apple',
     color: 'Space Gray / Silver',
-    image_url: '/src/assets/images/found_item_macbook_1793681206791.jpg',
+    image_url: '/images/found_item_macbook_1793681206791.jpg',
     report_date: new Date(Date.now() - 2 * 86400000).toISOString().split('T')[0],
     location: 'Main Science Library - 2nd Floor Study Cubicle 14',
     submitted_to: 'Central Campus Security Desk (Gate 2)',
@@ -120,7 +164,7 @@ let items: any[] = [
     item_type: 'found',
     brand: 'Sony',
     color: 'Matte Black',
-    image_url: '/src/assets/images/found_item_headphones_1793681207346.jpg',
+    image_url: '/images/found_item_headphones_1793681207346.jpg',
     report_date: new Date(Date.now() - 3 * 86400000).toISOString().split('T')[0],
     location: 'Humanities Hall Study Lounge',
     submitted_to: 'Campus Administration Office Room 102',
@@ -138,7 +182,7 @@ let items: any[] = [
     item_type: 'found',
     brand: 'Herschel / North Face',
     color: 'Navy Blue',
-    image_url: '/src/assets/images/found_item_backpack_1793681207588.jpg',
+    image_url: '/images/found_item_backpack_1793681207588.jpg',
     report_date: new Date(Date.now() - 5 * 86400000).toISOString().split('T')[0],
     location: 'Student Cafeteria Outdoor Bench near Fountain',
     submitted_to: 'Student Union Helpdesk',
@@ -156,7 +200,7 @@ let items: any[] = [
     item_type: 'found',
     brand: 'University Housing',
     color: 'Blue Lanyard / Brass Keys',
-    image_url: '/src/assets/images/found_item_id_keys_1793681208297.jpg',
+    image_url: '/images/found_item_id_keys_1793681208297.jpg',
     report_date: new Date(Date.now() - 6 * 86400000).toISOString().split('T')[0],
     location: 'Engineering Block Auditorium B Hallway',
     submitted_to: 'Department Security Guard Station',
@@ -398,7 +442,8 @@ function requireAdmin(req: express.Request, res: express.Response, next: express
 
 async function startServer() {
   const app = express();
-app.use(
+
+  app.use(
     cors({
       origin: [
         'https://findit-a-smart-campus.onrender.com',
@@ -408,7 +453,12 @@ app.use(
       credentials: true,
     })
   );
-  app.use(express.json());
+  app.use(express.json({ limit: '15mb' }));
+
+  // Root Health Check
+  app.get('/', (_req, res) => {
+    res.json({ status: 'ok', message: 'Findlt Backend Server is Live' });
+  });
 
   // Public Stats API for Landing Page
   app.get('/api/stats/public', (_req, res) => {
@@ -473,7 +523,6 @@ app.use(
     const emailNormalized = email.toLowerCase().trim();
     const campusIdNormalized = campus_id.toUpperCase().trim();
 
-    // Check duplicate
     if (profiles.some(p => p.email.toLowerCase() === emailNormalized)) {
       return res.status(409).json({ error: 'An account with this college email already exists.' });
     }
@@ -490,7 +539,7 @@ app.use(
       department: department || 'General Studies',
       course: course || 'Undergraduate',
       semester: semester || 'Current',
-      role: 'student', // Security: Role cannot be self-elevated
+      role: 'student',
       account_status: 'active',
       password_hash: hashPassword(password),
       created_at: new Date().toISOString()
@@ -498,7 +547,6 @@ app.use(
 
     profiles.push(newProfile);
 
-    // Welcome notification
     notifications.unshift({
       id: 'notif_' + Date.now(),
       user_id: newProfile.id,
@@ -532,8 +580,8 @@ app.use(
     const query = identifier.trim().toLowerCase();
     const hashed = hashPassword(password);
 
-    const user = profiles.find(p =>
-      (p.email.toLowerCase() === query || p.campus_id.toLowerCase() === query)
+    const user = profiles.find(
+      p => p.email.toLowerCase() === query || p.campus_id.toLowerCase() === query
     );
 
     if (!user || user.password_hash !== hashed) {
@@ -566,6 +614,54 @@ app.use(
     const user = (req as any).user;
     const { password_hash, ...safeUser } = user;
     res.json({ user: safeUser });
+  });
+
+  // IMAGE UPLOAD ROUTE (Supabase Storage + Base64 Fallback)
+  app.post('/api/items/upload', verifyToken, async (req, res) => {
+    try {
+      const fileData = await parseMultipartFile(req);
+      if (!fileData || !fileData.buffer.length) {
+        return res.status(400).json({ error: 'No image file provided.' });
+      }
+
+      const supabaseUrl = (process.env.SUPABASE_URL || '').replace(/\/$/, '');
+      const supabaseKey = process.env.SUPABASE_KEY || '';
+      const bucketName = process.env.SUPABASE_BUCKET_NAME || 'items';
+
+      if (supabaseUrl && supabaseKey) {
+        const cleanName = fileData.filename.replace(/[^a-zA-Z0-9._-]/g, '_');
+        const filePath = `found-items/${Date.now()}_${cleanName}`;
+        const uploadEndpoint = `${supabaseUrl}/storage/v1/object/${bucketName}/${filePath}`;
+
+        const uploadRes = await fetch(uploadEndpoint, {
+          method: 'POST',
+          headers: {
+            Authorization: `Bearer ${supabaseKey}`,
+            apikey: supabaseKey,
+            'Content-Type': fileData.mimetype,
+            'x-upsert': 'true',
+          },
+          body: new Uint8Array(fileData.buffer),
+        });
+
+        if (uploadRes.ok) {
+          const publicUrl = `${supabaseUrl}/storage/v1/object/public/${bucketName}/${filePath}`;
+          return res.json({
+            url: publicUrl,
+            message: 'Image uploaded successfully',
+          });
+        }
+      }
+
+      const base64Url = `data:${fileData.mimetype};base64,${fileData.buffer.toString('base64')}`;
+      return res.json({
+        url: base64Url,
+        message: 'Image uploaded successfully',
+      });
+    } catch (err) {
+      console.error('Image upload error:', err);
+      return res.status(500).json({ error: 'Failed to upload image.' });
+    }
   });
 
   // ITEMS PUBLIC & STUDENT ROUTES
@@ -614,7 +710,7 @@ app.use(
     const paginatedItems = filtered.slice((p - 1) * l, p * l).map(i => {
       return {
         ...i,
-        user_id: undefined // Mask reporter ID in public list for privacy
+        user_id: undefined
       };
     });
 
@@ -641,7 +737,7 @@ app.use(
         if (decoded.role === 'admin' || decoded.userId === item.user_id) {
           isOwnerOrAdmin = true;
         }
-      } catch (e) {
+      } catch (_e) {
         // ignore
       }
     }
@@ -695,7 +791,6 @@ app.use(
 
     items.unshift(newItem);
 
-    // Notify user
     notifications.unshift({
       id: 'notif_' + Date.now(),
       user_id: user.id,
@@ -735,7 +830,7 @@ app.use(
       item_type: 'found',
       brand: req.body.brand || '',
       color: req.body.color || '',
-      image_url: image_url || '/src/assets/images/found_item_macbook_1793681206791.jpg',
+      image_url: image_url || '/images/found_item_macbook_1793681206791.jpg',
       report_date: found_date || new Date().toISOString().split('T')[0],
       location: found_location.trim(),
       submitted_to: submitted_to ? submitted_to.trim() : 'Campus Security Office',
@@ -748,7 +843,6 @@ app.use(
 
     items.unshift(newItem);
 
-    // Notify finder
     notifications.unshift({
       id: 'notif_' + Date.now(),
       user_id: user.id,
@@ -759,7 +853,6 @@ app.use(
       created_at: new Date().toISOString()
     });
 
-    // Notify admins
     profiles.filter(p => p.role === 'admin').forEach(admin => {
       notifications.unshift({
         id: 'notif_' + Date.now() + '_' + Math.random().toString(36).substring(2, 5),
@@ -874,11 +967,9 @@ app.use(
 
     claims.unshift(newClaim);
 
-    // Update item status to 'claimed' if was open
     item.status = 'claimed';
     item.updated_at = new Date().toISOString();
 
-    // Notify claimant
     notifications.unshift({
       id: 'notif_' + Date.now(),
       user_id: user.id,
@@ -889,7 +980,6 @@ app.use(
       created_at: new Date().toISOString()
     });
 
-    // Notify admins
     profiles.filter(p => p.role === 'admin').forEach(admin => {
       notifications.unshift({
         id: 'notif_' + Date.now() + '_' + Math.random().toString(36).substring(2, 5),
@@ -996,7 +1086,7 @@ app.use(
         notifications: userNotifs,
         unread_count: unreadCount
       });
-    } catch (err) {
+    } catch (_err) {
       return res.json({ notifications: [], unread_count: 0 });
     }
   });
@@ -1023,7 +1113,6 @@ app.use(
   // SUPER ADMIN PANEL REST APIS
   // ========================================================
 
-  // 1. Live Dashboard Statistics & Analytics
   app.get('/api/admin/dashboard', verifyToken, requireAdmin, (_req, res) => {
     const totalStudents = profiles.filter(p => p.role === 'student').length;
     const totalUsers = profiles.length;
@@ -1105,7 +1194,6 @@ app.use(
     });
   });
 
-  // 2. User Management
   app.get('/api/admin/users', verifyToken, requireAdmin, (_req, res) => {
     const safeUsers = profiles.map(p => {
       const { password_hash, ...u } = p;
@@ -1159,7 +1247,6 @@ app.use(
       return res.status(404).json({ error: 'User not found' });
     }
 
-    // Security: Prevent admins from accidentally removing their own admin access or blocking themselves
     if (currentAdmin.id === targetUser.id && (status === 'suspended' || role === 'student')) {
       return res.status(400).json({ error: 'Security constraint: Administrators cannot suspend or demote their own active account.' });
     }
@@ -1209,7 +1296,6 @@ app.use(
     res.json({ message: 'User status updated successfully', user: safeUser });
   });
 
-  // 3. Items Management (Lost & Found)
   app.get('/api/admin/items', verifyToken, requireAdmin, (_req, res) => {
     const fullItems = items.map(i => {
       const reporter = profiles.find(p => p.id === i.user_id);
@@ -1317,7 +1403,6 @@ app.use(
     res.json({ message: 'Report removed from campus database' });
   });
 
-  // 4. Claims & Handover Verification
   app.get('/api/admin/claims', verifyToken, requireAdmin, (_req, res) => {
     const enrichedClaims = claims.map(c => {
       const item = items.find(i => i.id === c.item_id);
@@ -1371,7 +1456,6 @@ app.use(
       status
     );
 
-    // Notify student claimant
     notifications.unshift({
       id: 'notif_' + Date.now(),
       user_id: claim.claimant_id,
@@ -1408,7 +1492,6 @@ app.use(
 
     const prevItemStatus = item.status;
 
-    // Update statuses
     item.status = 'returned';
     item.updated_at = new Date().toISOString();
 
@@ -1417,7 +1500,6 @@ app.use(
     claim.reviewed_by = admin.id;
     claim.updated_at = new Date().toISOString();
 
-    // Reject any conflicting claims for this same item
     claims.forEach(c => {
       if (c.item_id === item_id && c.id !== claim_id && c.status !== 'Completed') {
         c.status = 'Rejected';
@@ -1449,11 +1531,10 @@ app.use(
       'returned'
     );
 
-    // Notify claimant
     notifications.unshift({
       id: 'notif_' + Date.now(),
       user_id: claim.claimant_id,
-      title: 'Item Handover Complete! 🎉',
+      title: 'Item Handover Complete!',
       message: `Your item "${item.item_name}" was successfully verified and handed over. Thank you for using Findlt Campus Lost & Found!`,
       notification_type: 'item_returned',
       is_read: false,
@@ -1468,7 +1549,6 @@ app.use(
     });
   });
 
-  // 5. Returned Items List
   app.get('/api/admin/returned-items', verifyToken, requireAdmin, (_req, res) => {
     const list = handover_records.map(h => {
       const item = items.find(i => i.id === h.item_id);
@@ -1489,7 +1569,6 @@ app.use(
     res.json({ returned_items: list });
   });
 
-  // 6. Categories Management
   app.get('/api/admin/categories', verifyToken, requireAdmin, (_req, res) => {
     const enriched = item_categories.map(c => ({
       ...c,
@@ -1546,7 +1625,6 @@ app.use(
     res.json({ message: 'Category updated', category: cat });
   });
 
-  // 7. Activity Logs
   app.get('/api/admin/logs', verifyToken, requireAdmin, (req, res) => {
     const { action, search, limit = '50' } = req.query;
     let list = [...admin_activity_logs];
@@ -1572,7 +1650,6 @@ app.use(
     });
   });
 
-  // 8. Notifications & Broadcasts
   app.post('/api/admin/broadcast', verifyToken, requireAdmin, (req, res) => {
     const admin = (req as any).user;
     const { title, message } = req.body;
@@ -1586,7 +1663,7 @@ app.use(
       notifications.unshift({
         id: 'notif_bcast_' + Date.now() + '_' + Math.random().toString(36).substring(2, 6),
         user_id: student.id,
-        title: `📢 Campus Announcement: ${title.trim()}`,
+        title: `Campus Announcement: ${title.trim()}`,
         message: message.trim(),
         notification_type: 'campus_announcement',
         is_read: false,
@@ -1641,7 +1718,6 @@ app.use(
     res.json({ message: `Notification sent to ${targetUser.full_name}` });
   });
 
-  // 9. Institutional System Settings
   app.get('/api/admin/settings', verifyToken, requireAdmin, (_req, res) => {
     res.json({ settings: system_settings });
   });
@@ -1667,7 +1743,7 @@ app.use(
     res.json({ message: 'System settings saved successfully', settings: system_settings });
   });
 
-app.listen(PORT, '0.0.0.0', () => {
+  app.listen(PORT, '0.0.0.0', () => {
     const url = `http://localhost:${PORT}`;
     console.log(`Findlt Backend Server running on ${url}`);
   });
@@ -1676,4 +1752,3 @@ app.listen(PORT, '0.0.0.0', () => {
 startServer().catch(err => {
   console.error('Failed to start server:', err);
 });
-  
