@@ -398,9 +398,17 @@ function requireAdmin(req: express.Request, res: express.Response, next: express
 
 async function startServer() {
   const app = express();
-  app.use(cors());
-  app.use(express.json({ limit: '50mb' }));
-  app.use(express.urlencoded({ extended: true, limit: '50mb' }));
+app.use(
+    cors({
+      origin: [
+        'https://findit-a-smart-campus.onrender.com',
+        'http://localhost:5173',
+        'http://localhost:3000',
+      ],
+      credentials: true,
+    })
+  );
+  app.use(express.json());
 
   // Public Stats API for Landing Page
   app.get('/api/stats/public', (_req, res) => {
